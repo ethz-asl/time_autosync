@@ -19,7 +19,7 @@ This filter is pretty new and only tested on a couple of datasets I had lying ar
 | `stamp_on_arrival` |  If true it will throw out the image timestamps and replace them with arrival times. | false |
 | `max_imu_data_age_s` | How long in seconds to keep IMU data, the camera timing offset needs to be in this range. | 2.0 |
 | `delay_by_n_frames` | Delays putting camera images into the filter by this many frames. Used to ensure there are plenty of IMU messages ahead of the frame to get IMU messages from. **Note this does not cause any delay in the output of timesynced images.** | 3 |
-| `focal_length` | The focal length of the camera. A rough guess is fine and the system ususally runs without issue on distorted images | 460 |
+| `focal_length` | The focal length of the camera. A rough guess is fine and the system seems to run ok on distorted images | 460 |
 | `calc_offset` | If true the absolute time offset between the camera and an IMU is calculated. If false only some dejittering is performed (this saves a lot of CPU and most of the above parameters don't apply). | true |
 
 ### Filter Parameters
