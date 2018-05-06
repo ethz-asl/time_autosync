@@ -38,8 +38,9 @@ class TimeAutosync {
 
   bool verbose_;
   bool stamp_on_arrival_;
-
   double max_imu_data_age_s_;
+  int delay_by_n_frames_;
+  double focal_length_;
 
   std::unique_ptr<CDKF> cdkf_;
 

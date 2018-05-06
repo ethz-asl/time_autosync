@@ -17,11 +17,18 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
       it_(nh_private_),
       verbose_(false),
       stamp_on_arrival_(false),
-      max_imu_data_age_s_(2.0) {
+      max_imu_data_age_s_(2.0),
+      delay_by_n_frames_(2),
+      focal_length_(460.0),
+      calc_offset(false) {
   nh_private_.param("verbose", verbose_, verbose_);
   nh_private_.param("stamp_on_arrival", stamp_on_arrival_, stamp_on_arrival_);
   nh_private_.param("max_imu_data_age_s", max_imu_data_age_s_,
                     max_imu_data_age_s_);
+  nh_private_.param("delay_by_n_frames", delay_by_n_frames_,
+                    delay_by_n_frames_);
+  nh_private_.param("focal_length", focal_length_, focal_length_);
+  nh_private_.param("calc_offset", calc_offset, calc_offset);
 
   setupCDKF();
 
@@ -38,6 +45,10 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
 
 void TimeAutosync::setupCDKF() {
   CDKF::Config config;
+
+  nh_private_.param("verbose", config.verbose, config.verbose);
+  nh_private_.param("mah_threshold", config.mah_threshold,
+                    config.mah_threshold);
 
   nh_private_.param("inital_delta_t", config.inital_delta_t,
                     config.inital_delta_t);
@@ -59,7 +70,7 @@ void TimeAutosync::setupCDKF() {
 
 double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
                                             const cv::Mat& image) {
-  constexpr int kMaxCorners = 1000;
+  constexpr int kMaxCorners = 50;
   constexpr double kQualityLevel = 0.01;
   constexpr double kMinDistance = 10;
 
@@ -68,7 +79,7 @@ double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
                           kMinDistance);
 
   if (prev_points.size() == 0) {
-    ROS_ERROR("prev points empty wtf");
+    ROS_ERROR("Tracking has failed cannot calculate angle");
     return 0.0;
   }
 
@@ -85,7 +96,7 @@ double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
     }
   }
 
-  cv::Mat viz_image;
+  /*cv::Mat viz_image;
   cv::cvtColor(prev_image, viz_image, cv::COLOR_GRAY2BGR);
 
   for (size_t i = 0; i < tracked_points.size(); ++i) {
@@ -95,18 +106,15 @@ double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
 
   cv::namedWindow("Tracked Points", cv::WINDOW_AUTOSIZE);
   cv::imshow("Tracked Points", viz_image);
-  cv::waitKey(1);
+  cv::waitKey(1);*/
 
-  // noramilze values
-
-  /*constexpr double kFocalLength = 460.0;
   // close enough for most cameras given the low level of accuracy needed
   const cv::Point2f offset(image.cols / 2.0, image.rows / 2.0);
 
   for (size_t i = 0; i < tracked_points.size(); ++i) {
-    tracked_prev_points[i] = (tracked_prev_points[i] - offset) / kFocalLength;
-    tracked_points[i] = (tracked_points[i] - offset) / kFocalLength;
-  }*/
+    tracked_prev_points[i] = (tracked_prev_points[i] - offset) / focal_length_;
+    tracked_points[i] = (tracked_points[i] - offset) / focal_length_;
+  }
 
   constexpr double kMaxEpipoleDistance = 1e-3;
   constexpr double kInlierProbability = 0.99;
@@ -116,13 +124,9 @@ double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
       cv::findFundamentalMat(tracked_prev_points, tracked_points, cv::FM_LMEDS,
                              kMaxEpipoleDistance, kInlierProbability, inliers);
 
-  Eigen::Matrix3d E, W, K;
-
-  K << 458.654, 0.0, 367.215, 0.0, 457.296, 248.375, 0.0, 0.0, 1.0;
+  Eigen::Matrix3d E, W;
 
   cv::cv2eigen(cv_F, E);
-
-  E = K.transpose() * E * K;
 
   Eigen::JacobiSVD<Eigen::Matrix3d> svd(
       E, Eigen::ComputeThinU | Eigen::ComputeThinV);
@@ -191,7 +195,7 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   if (stamp_on_arrival_) {
     stamp = ros::Time::now();
   } else {
-    stamp = msg->header.stamp;
+    stamp = msg->header.stamp + ros::Duration(0.2);
   }
 
   cv_bridge::CvImagePtr image = cv_bridge::toCvCopy(msg, "mono8");
@@ -201,26 +205,26 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   static std::list<cv_bridge::CvImage> images;
   images.push_back(*image);
 
-  if (images.size() < 20) {
+  if (images.size() < delay_by_n_frames_) {
     cdkf_->rezeroTimestamps(images.front().header.stamp, true);
     return;
   }
 
-  if (imu_rotations_.size() < 2) {
+  if (calc_offset && (imu_rotations_.size() < 2)) {
     return;
   }
 
-  double image_angle = calcAngleBetweenImages(images.begin()->image,
-                                              std::next(images.begin())->image);
+  double image_angle = 0.0;
+  if (calc_offset) {
+    image_angle = calcAngleBetweenImages(images.begin()->image,
+                                         std::next(images.begin())->image);
+  }
 
   // actually run filter
-  ROS_ERROR("IMU UPDATE");
   cdkf_->predictionUpdate(std::next(images.begin())->header.stamp);
-  ROS_ERROR("MEASUREMENT UPDATE");
   cdkf_->measurementUpdate(images.begin()->header.stamp,
                            std::next(images.begin())->header.stamp, image_angle,
-                           imu_rotations_);
-  ROS_ERROR("DONE");
+                           imu_rotations_, calc_offset);
 
   images.pop_front();
 }

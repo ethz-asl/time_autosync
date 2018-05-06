@@ -15,6 +15,9 @@ class CDKF {
   struct Config {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
+    bool verbose = true;
+    double mah_threshold;
+
     // inital values
     double inital_delta_t = 0.05;
     double inital_offset = 0.0;
@@ -57,6 +60,9 @@ class CDKF {
         config.timestamp_sd;
     accessM(measurement_noise_sd_, ANGULAR_VELOCITY).array() =
         config.angular_velocity_sd;
+
+    mah_threshold_ = config.mah_threshold_;
+    verbose_ = config.verbose_;
   }
 
   // make all stored timestamps relative to this one, called periodically to
@@ -83,20 +89,24 @@ class CDKF {
     int num_frames =
         std::round((received_timestamp - *synced_timestamp).toSec() / delta_t);
 
-    if ((num_frames > 2) || (num_frames < 0)) {
+    if (std::abs(num_frames) > 10) {
       ROS_WARN_STREAM("Timesync is now off by "
                       << num_frames
                       << " frames, something must be going horribly wrong");
     }
     *synced_timestamp += ros::Duration(num_frames * delta_t);
 
-    // finally account for the offset
-    *synced_timestamp += ros::Duration(accessS(state_, OFFSET)[0]);
+    if(calc_offset){
+      *synced_timestamp += ros::Duration(accessS(state_, OFFSET)[0]);
+    }
   }
 
   void predictionUpdate(const ros::Time& received_timestamp) {
-    ROS_WARN_STREAM("Initial State: \n" << state_.transpose());
-    ROS_WARN_STREAM("Initial Cov: \n" << cov_);
+    
+    if(verbose_){
+      ROS_INFO_STREAM("Initial State: \n" << state_.transpose());
+      ROS_INFO_STREAM("Initial Cov: \n" << cov_);
+    }
 
     StateSigmaPoints sigma_points(state_, cov_, prediction_noise_sd_,
                                   CDKF::propergateState,
@@ -105,33 +115,32 @@ class CDKF {
     sigma_points.calcEstimatedMean(&state_);
     sigma_points.calcEstimatedCov(&cov_);
 
-    ROS_WARN_STREAM("Predicted State: \n" << state_.transpose());
-    ROS_WARN_STREAM("Predicted Cov: \n" << cov_);
-    ROS_ERROR_STREAM("received : " << received_timestamp.sec << "."
-                                   << std::setfill('0') << std::setw(9)
-                                   << received_timestamp.nsec);
+    if(verbose_){
+      ROS_INFO_STREAM("Predicted State: \n" << state_.transpose());
+      ROS_INFO_STREAM("Predicted Cov: \n" << cov_);
+    }
   }
 
   void measurementUpdate(const ros::Time& prev_stamp,
                          const ros::Time& current_stamp,
                          const double image_angular_velocity,
-                         const IMUList& imu_rotations) {
+                         const IMUList& imu_rotations, const bool calc_offset) {
     // convert tracked points to measurement
     Eigen::VectorXd real_measurement(kMeasurementSize);
     accessM(real_measurement, MEASURED_TIMESTAMP).array() =
         (current_stamp - zero_timestamp_).toSec();
+
     accessM(real_measurement, ANGULAR_VELOCITY).array() =
         image_angular_velocity;
 
-    ROS_ERROR_STREAM("zero : " << zero_timestamp_.sec << "."
-                               << std::setfill('0') << std::setw(9)
-                               << zero_timestamp_.nsec);
-    ROS_WARN_STREAM("measured " << real_measurement.transpose());
+    if(verbose_){
+      ROS_INFO_STREAM("Measured Values: \n" << real_measurement.transpose());
+    }
 
     // create sigma points
-    MeasurementSigmaPoints sigma_points(state_, cov_, measurement_noise_sd_,
-                                        CDKF::stateToMeasurementEstimate,
-                                        imu_rotations, zero_timestamp_);
+    MeasurementSigmaPoints sigma_points(
+        state_, cov_, measurement_noise_sd_, CDKF::stateToMeasurementEstimate,
+        imu_rotations, zero_timestamp_, calc_offset);
 
     // get mean and cov
     Eigen::VectorXd predicted_measurement;
@@ -139,13 +148,15 @@ class CDKF {
     Eigen::MatrixXd innovation;
     sigma_points.calcEstimatedCov(&innovation);
 
-    ROS_WARN_STREAM("predicted " << predicted_measurement.transpose());
+    if(verbose_){
+      ROS_INFO_STREAM("Predicted Measurements: \n" << predicted_measurement.transpose());
+    }
 
     // calc mah distance
     Eigen::VectorXd diff = real_measurement - predicted_measurement;
     double mah_dist = std::sqrt(diff.transpose() * innovation.inverse() * diff);
-    if (mah_dist > 10) {
-      ROS_ERROR("Outlier detected, measurement rejected");
+    if (mah_dist > mah_threshold_) {
+      ROS_WARN("Outlier detected, measurement rejected");
       return;
     }
 
@@ -161,8 +172,10 @@ class CDKF {
 
     cov_ -= gain * innovation * gain.transpose();
 
-    ROS_WARN_STREAM("Updated State: \n" << state_.transpose());
-    ROS_WARN_STREAM("Updated Cov: \n" << cov_);
+    if(verbose_){
+      ROS_INFO_STREAM("Updated State: \n" << state_.transpose());
+      ROS_INFO_STREAM("Updated Cov: \n" << cov_);
+    }
 
     // guard against precision issues
     constexpr double kMaxTime = 10000.0;
@@ -173,15 +186,11 @@ class CDKF {
 
   static void stateToMeasurementEstimate(
       const IMUList& imu_rotations, const ros::Time zero_stamp,
-      const Eigen::VectorXd& input_state, const Eigen::VectorXd& noise,
+      bool calc_offset, const Eigen::VectorXd& input_state,
+      const Eigen::VectorXd& noise,
       Eigen::Ref<Eigen::VectorXd> estimated_measurement) {
-    
-
     ros::Time end_stamp =
-        zero_stamp + ros::Duration(accessS(input_state, STATE_TIMESTAMP)[0]) +
-        ros::Duration(accessS(input_state, OFFSET)[0]);
-
-    ROS_WARN_STREAM("end: " << end_stamp.toSec() << " d: " << accessS(input_state, STATE_TIMESTAMP)[0]);
+        zero_stamp + ros::Duration(accessS(input_state, STATE_TIMESTAMP)[0]);
 
     // this doesn't guard against the case of a dropped frame, but the angular
     // velocity will probably still be pretty similar
@@ -189,7 +198,13 @@ class CDKF {
         end_stamp - ros::Duration(accessS(input_state, DELTA_T)[0]);
 
     accessM(estimated_measurement, ANGULAR_VELOCITY).array() =
-        getImuAngleChange(imu_rotations, start_stamp, end_stamp) + accessM(noise, ANGULAR_VELOCITY)[0];
+        accessM(noise, ANGULAR_VELOCITY)[0];
+
+    if (calc_offset) {
+      end_stamp += ros::Duration(accessS(input_state, OFFSET)[0]);
+      accessM(estimated_measurement, ANGULAR_VELOCITY).array() +=
+          getImuAngleChange(imu_rotations, start_stamp, end_stamp);
+    }
 
     accessM(estimated_measurement, MEASURED_TIMESTAMP) =
         accessS(input_state, STATE_TIMESTAMP) + accessM(noise, STATE_TIMESTAMP);
@@ -215,6 +230,9 @@ class CDKF {
 
  private:
   ros::Time zero_timestamp_;
+
+  double mah_threshold_;
+  bool verbose_;
 
   Eigen::VectorXd state_;
   Eigen::MatrixXd cov_;
