@@ -16,7 +16,7 @@
     <param name="focal_length" value="460"/>
     <param name="calc_offset" value="true"/>
 
-    <param name="verbose" value="true"/>
+    <param name="verbose" value="false"/>
     <param name="mah_threshold" value="10.0"/>
     
     <param name="inital_delta_t" value="0.05"/>
