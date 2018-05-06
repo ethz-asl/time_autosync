@@ -13,7 +13,7 @@
 
 <node name="time_autosync" pkg="time_autosync" type="time_autosync_node" >
 
-    <param name="stamp_on_arrival" value="true"/>
+    <param name="stamp_on_arrival" value="false"/>
     <remap from="/time_autosync/input/image" to="/output/image"/>
     <remap from="/time_autosync/input/imu" to="/imu0"/>
 </node>

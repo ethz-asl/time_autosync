@@ -31,6 +31,10 @@ class SigmaPointsBase {
         (sigma_plus_ + sigma_minus_).colwise() - 2 * sigma_zero_;
 
     *cov = wc1i_ * alpha * alpha.transpose() + wc2i_ * beta * beta.transpose();
+
+    //keep things bounded and sane
+    cov->diagonal() = cov->diagonal().array().max(1e-20);
+    cov->diagonal() = cov->diagonal().array().min(1e20);
   }
 
  protected:

@@ -18,23 +18,14 @@ class TimeAutosync {
   TimeAutosync(const ros::NodeHandle& nh, const ros::NodeHandle& nh_private);
 
  private:
-  double calcAngleBetweenImages(const cv::Mat& prev_image, const cv::Mat& image);
+  double calcAngleBetweenImages(const cv::Mat& prev_image,
+                                const cv::Mat& image);
 
   void imuCallback(const sensor_msgs::ImuConstPtr& msg);
 
   void imageCallback(const sensor_msgs::ImageConstPtr& msg);
 
   void setupCDKF();
-
-  static Eigen::Quaterniond getInterpolatedImuAngle(
-      const AlignedList<std::pair<ros::Time, Eigen::Quaterniond>>&
-          imu_rotations,
-      const ros::Time& stamp);
-
-  static double getImuAngleChange(
-      const AlignedList<std::pair<ros::Time, Eigen::Quaterniond>>&
-          imu_rotations,
-      const ros::Time& start_stamp, const ros::Time& end_stamp);
 
   ros::NodeHandle nh_;
   ros::NodeHandle nh_private_;
@@ -52,7 +43,7 @@ class TimeAutosync {
 
   std::unique_ptr<CDKF> cdkf_;
 
-  AlignedList<std::pair<ros::Time, Eigen::Quaterniond>> imu_rotations_;
+  IMUList imu_rotations_;
 };
 
 #endif  // TIME_AUTOSYNC_TIME_AUTOSYNC_H

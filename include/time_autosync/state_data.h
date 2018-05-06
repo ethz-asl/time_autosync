@@ -5,10 +5,16 @@
 
 #include "time_autosync/common.h"
 
-enum StateElements : size_t { STATE_TIMESTAMP, DELTA_T, OFFSET, NUM_STATE_ELEMENTS };
+enum StateElements : size_t {
+  STATE_TIMESTAMP,
+  DELTA_T,
+  OFFSET,
+  NUM_STATE_ELEMENTS
+};
 
 enum MeasurementElements : size_t {
   MEASURED_TIMESTAMP,
+  ANGULAR_VELOCITY,
   NUM_MEASUREMENT_ELEMENTS
 };
 

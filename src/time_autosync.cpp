@@ -17,11 +17,13 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
       it_(nh_private_),
       verbose_(false),
       stamp_on_arrival_(false),
-      max_imu_data_age_s_(1.0) {
+      max_imu_data_age_s_(2.0) {
   nh_private_.param("verbose", verbose_, verbose_);
   nh_private_.param("stamp_on_arrival", stamp_on_arrival_, stamp_on_arrival_);
   nh_private_.param("max_imu_data_age_s", max_imu_data_age_s_,
                     max_imu_data_age_s_);
+
+  setupCDKF();
 
   image_sub_ =
       it_.subscribe("input/image", 10, &TimeAutosync::imageCallback, this);
@@ -184,57 +186,7 @@ void TimeAutosync::imuCallback(const sensor_msgs::ImuConstPtr& msg) {
   prev_msg = *msg;
 }
 
-Eigen::Quaterniond TimeAutosync::getInterpolatedImuAngle(
-    const AlignedList<std::pair<ros::Time, Eigen::Quaterniond>>& imu_rotations,
-    const ros::Time& stamp) {
-  Eigen::Quaterniond angle;
-
-  AlignedList<std::pair<ros::Time, Eigen::Quaterniond>>::const_iterator prev_it,
-      it;
-  prev_it = imu_rotations.begin();
-
-  // find location of starting stamp
-  for (it = imu_rotations.begin();
-       (std::next(it) != imu_rotations.end()) && (it->first < stamp);
-       prev_it = it++)
-    ;
-
-  // interpolate to get angle
-  if (prev_it->first == it->first) {
-    angle = it->second;
-  } else {
-    const double delta_t = (it->first - prev_it->first).toSec();
-    double w = (it->first - stamp).toSec() / delta_t;
-
-    // don't extrapolate
-    if (w < 0.0) {
-      ROS_WARN("Trying to get Imu data from too far in the past");
-      w = 0.0;
-    } else if (w > 1.0) {
-      ROS_WARN("Trying to get Imu data from too far in the future");
-      w = 1.0;
-    }
-
-    angle = prev_it->second.slerp(w, it->second);
-  }
-
-  return angle;
-}
-
-double TimeAutosync::getImuAngleChange(
-    const AlignedList<std::pair<ros::Time, Eigen::Quaterniond>>& imu_rotations,
-    const ros::Time& start_stamp, const ros::Time& end_stamp) {
-  Eigen::Quaterniond start_angle =
-      getInterpolatedImuAngle(imu_rotations, start_stamp);
-  Eigen::Quaterniond end_angle =
-      getInterpolatedImuAngle(imu_rotations, end_stamp);
-  Eigen::AngleAxisd diff_angle(start_angle.inverse() * end_angle);
-
-  return diff_angle.angle();
-}
-
 void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
-
   ros::Time stamp;
   if (stamp_on_arrival_) {
     stamp = ros::Time::now();
@@ -245,26 +197,12 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   cv_bridge::CvImagePtr image = cv_bridge::toCvCopy(msg, "mono8");
   image->header.stamp = stamp;
 
-  // put a 1 image delay in the estimation to allow for the possibility that the
-  // image is coming in before the imu messages
-  static cv_bridge::CvImage prev_image;
-  static cv_bridge::CvImage prev_prev_image;
-  static size_t seen_atleast_n_images = 0;
+  // delay by a few messages to ensure IMU messages span needed range
+  static std::list<cv_bridge::CvImage> images;
+  images.push_back(*image);
 
-  ROS_ERROR_STREAM("IMAGE CALLBACK " << seen_atleast_n_images);
-
-  if (seen_atleast_n_images == 0) {
-    seen_atleast_n_images = 1;
-    prev_image = *image;
-    return;
-  } else if (seen_atleast_n_images == 1) {
-    seen_atleast_n_images = 2;
-    prev_prev_image = prev_image;
-    prev_image = *image;
-
-    // leave creating filter as late as possible as if we are playing off a bag
-    // we need to grab its clock
-    setupCDKF();
+  if (images.size() < 20) {
+    cdkf_->rezeroTimestamps(images.front().header.stamp, true);
     return;
   }
 
@@ -272,40 +210,17 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
     return;
   }
 
-  double image_angle =
-      calcAngleBetweenImages(prev_prev_image.image, prev_image.image);
-  double imu_angle = getImuAngleChange(
-      imu_rotations_, prev_prev_image.header.stamp, prev_image.header.stamp);
-
-  myfile << image_angle << "," << imu_angle << "\n";
-
-  prev_prev_image = prev_image;
-  prev_image = *image;
-
-  /*ros::Time stamp;
-  if (stamp_on_arrival_) {
-    stamp = ros::Time::now();
-  } else {
-    stamp = msg->header.stamp;
-  }
-
-  if (!initalized) {
-    prev_stamp = stamp;
-    initalized = true;
-    return;
-  }
-
-  if (prev_stamp >= stamp) {
-    ROS_ERROR(
-        "The timestamps just went back in time. If your timings are really "
-        "this messed up it may be better to set stamp_on_arrival to true");
-  }*/
+  double image_angle = calcAngleBetweenImages(images.begin()->image,
+                                              std::next(images.begin())->image);
 
   // actually run filter
   ROS_ERROR("IMU UPDATE");
-  cdkf_->predictionUpdate(prev_image.header.stamp);
+  cdkf_->predictionUpdate(std::next(images.begin())->header.stamp);
   ROS_ERROR("MEASUREMENT UPDATE");
-  cdkf_->measurementUpdate(prev_prev_image.header.stamp,
-                           prev_image.header.stamp);
+  cdkf_->measurementUpdate(images.begin()->header.stamp,
+                           std::next(images.begin())->header.stamp, image_angle,
+                           imu_rotations_);
   ROS_ERROR("DONE");
+
+  images.pop_front();
 }

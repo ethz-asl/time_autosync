@@ -20,13 +20,13 @@ class CDKF {
     double inital_offset = 0.0;
 
     // inital noise values
-    double inital_timestamp_sd = 0.5;
+    double inital_timestamp_sd = 0.1;
     double inital_delta_t_sd = 0.1;
-    double inital_offset_sd = 0.2;
+    double inital_offset_sd = 0.1;
 
     // measurement noise
     double timestamp_sd = 0.02;
-    double angular_velocity_sd = 0.02;
+    double angular_velocity_sd = 0.03;
 
     // process noise
     double delta_t_sd = 0.0001;
@@ -55,18 +55,18 @@ class CDKF {
     measurement_noise_sd_.resize(kMeasurementSize, 1);
     accessM(measurement_noise_sd_, MEASURED_TIMESTAMP).array() =
         config.timestamp_sd;
-    /*accessM(measurement_noise_sd_, ANGULAR_VELOCITY_NOISE).array() =
-        config.angular_velocity_sd;*/
-
-    zero_timestamp_ = ros::Time::now();
+    accessM(measurement_noise_sd_, ANGULAR_VELOCITY).array() =
+        config.angular_velocity_sd;
   }
 
   // make all stored timestamps relative to this one, called periodically to
   // prevent loss in precision
-  void rezeroTimestamps() {
-    ros::Time new_zero_timestamp = ros::Time::now();
-    double time_diff = (new_zero_timestamp - zero_timestamp_).toSec();
-    accessS(state_, STATE_TIMESTAMP).array() -= time_diff;
+  void rezeroTimestamps(const ros::Time& new_zero_timestamp,
+                        bool first_init = false) {
+    if (!first_init) {
+      double time_diff = (new_zero_timestamp - zero_timestamp_).toSec();
+      accessS(state_, STATE_TIMESTAMP).array() -= time_diff;
+    }
 
     zero_timestamp_ = new_zero_timestamp;
   }
@@ -107,20 +107,31 @@ class CDKF {
 
     ROS_WARN_STREAM("Predicted State: \n" << state_.transpose());
     ROS_WARN_STREAM("Predicted Cov: \n" << cov_);
+    ROS_ERROR_STREAM("received : " << received_timestamp.sec << "."
+                                   << std::setfill('0') << std::setw(9)
+                                   << received_timestamp.nsec);
   }
 
-  void measurementUpdate(
-      const ros::Time& prev_stamp, const ros::Time& current_stamp) {
+  void measurementUpdate(const ros::Time& prev_stamp,
+                         const ros::Time& current_stamp,
+                         const double image_angular_velocity,
+                         const IMUList& imu_rotations) {
     // convert tracked points to measurement
-    Eigen::VectorXd real_measurement(kMeasurementElementSize);
+    Eigen::VectorXd real_measurement(kMeasurementSize);
     accessM(real_measurement, MEASURED_TIMESTAMP).array() =
         (current_stamp - zero_timestamp_).toSec();
+    accessM(real_measurement, ANGULAR_VELOCITY).array() =
+        image_angular_velocity;
 
+    ROS_ERROR_STREAM("zero : " << zero_timestamp_.sec << "."
+                               << std::setfill('0') << std::setw(9)
+                               << zero_timestamp_.nsec);
     ROS_WARN_STREAM("measured " << real_measurement.transpose());
 
     // create sigma points
     MeasurementSigmaPoints sigma_points(state_, cov_, measurement_noise_sd_,
-                                        CDKF::stateToMeasurementEstimate);
+                                        CDKF::stateToMeasurementEstimate,
+                                        imu_rotations, zero_timestamp_);
 
     // get mean and cov
     Eigen::VectorXd predicted_measurement;
@@ -134,7 +145,8 @@ class CDKF {
     Eigen::VectorXd diff = real_measurement - predicted_measurement;
     double mah_dist = std::sqrt(diff.transpose() * innovation.inverse() * diff);
     if (mah_dist > 10) {
-      ROS_ERROR("Mah triggered");
+      ROS_ERROR("Outlier detected, measurement rejected");
+      return;
     }
 
     Eigen::MatrixXd cross_cov;
@@ -155,13 +167,30 @@ class CDKF {
     // guard against precision issues
     constexpr double kMaxTime = 10000.0;
     if (accessS(state_, STATE_TIMESTAMP)[0] > kMaxTime) {
-      rezeroTimestamps();
+      rezeroTimestamps(current_stamp);
     }
   }
 
   static void stateToMeasurementEstimate(
+      const IMUList& imu_rotations, const ros::Time zero_stamp,
       const Eigen::VectorXd& input_state, const Eigen::VectorXd& noise,
       Eigen::Ref<Eigen::VectorXd> estimated_measurement) {
+    
+
+    ros::Time end_stamp =
+        zero_stamp + ros::Duration(accessS(input_state, STATE_TIMESTAMP)[0]) +
+        ros::Duration(accessS(input_state, OFFSET)[0]);
+
+    ROS_WARN_STREAM("end: " << end_stamp.toSec() << " d: " << accessS(input_state, STATE_TIMESTAMP)[0]);
+
+    // this doesn't guard against the case of a dropped frame, but the angular
+    // velocity will probably still be pretty similar
+    ros::Time start_stamp =
+        end_stamp - ros::Duration(accessS(input_state, DELTA_T)[0]);
+
+    accessM(estimated_measurement, ANGULAR_VELOCITY).array() =
+        getImuAngleChange(imu_rotations, start_stamp, end_stamp) + accessM(noise, ANGULAR_VELOCITY)[0];
+
     accessM(estimated_measurement, MEASURED_TIMESTAMP) =
         accessS(input_state, STATE_TIMESTAMP) + accessM(noise, STATE_TIMESTAMP);
   }
