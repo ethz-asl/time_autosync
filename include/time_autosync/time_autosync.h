@@ -9,7 +9,7 @@
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/Imu.h>
 
-#include "time_autosync/ukf.h"
+#include "time_autosync/cdkf.h"
 
 class TimeAutosync {
  public:
@@ -34,7 +34,11 @@ class TimeAutosync {
   bool verbose_;
   bool stamp_on_arrival_;
 
-  std::unique_ptr<UKF> ukf_;
+  double max_imu_data_age_s_;
+
+  std::unique_ptr<CDKF> cdkf_;
+
+  AlignedList<std::pair<ros::Time, Eigen::Quaterniond>> imu_rotations;
 };
 
 #endif  // TIME_AUTOSYNC_TIME_AUTOSYNC_H
