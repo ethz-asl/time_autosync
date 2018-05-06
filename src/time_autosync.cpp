@@ -5,42 +5,37 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/xfeatures2d.hpp>
 
-#include <fstream>
-#include <iostream>
-
-std::ofstream myfile;
-
 TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
                            const ros::NodeHandle& nh_private)
     : nh_(nh),
       nh_private_(nh_private),
       it_(nh_private_),
-      verbose_(false),
       stamp_on_arrival_(false),
       max_imu_data_age_s_(2.0),
-      delay_by_n_frames_(2),
+      delay_by_n_frames_(3),
       focal_length_(460.0),
-      calc_offset(false) {
-  nh_private_.param("verbose", verbose_, verbose_);
+      calc_offset_(true) {
+
   nh_private_.param("stamp_on_arrival", stamp_on_arrival_, stamp_on_arrival_);
   nh_private_.param("max_imu_data_age_s", max_imu_data_age_s_,
                     max_imu_data_age_s_);
   nh_private_.param("delay_by_n_frames", delay_by_n_frames_,
                     delay_by_n_frames_);
   nh_private_.param("focal_length", focal_length_, focal_length_);
-  nh_private_.param("calc_offset", calc_offset, calc_offset);
+  nh_private_.param("calc_offset", calc_offset_, calc_offset_);
 
   setupCDKF();
 
-  image_sub_ =
-      it_.subscribe("input/image", 10, &TimeAutosync::imageCallback, this);
+  constexpr int kImageQueueSize = 10;
+  constexpr int kImuQueueSize = 100;
 
-  imu_sub_ =
-      nh_private_.subscribe("input/imu", 100, &TimeAutosync::imuCallback, this);
+  image_sub_ = it_.subscribe("input/image", kImageQueueSize,
+                             &TimeAutosync::imageCallback, this);
 
-  image_pub_ = image_pub_ = it_.advertise("output/image", 10);
+  imu_sub_ = nh_private_.subscribe("input/imu", kImuQueueSize,
+                                   &TimeAutosync::imuCallback, this);
 
-  myfile.open("/home/z/Desktop/test.csv");
+  image_pub_ = image_pub_ = it_.advertise("output/image", kImageQueueSize);
 }
 
 void TimeAutosync::setupCDKF() {
@@ -70,7 +65,7 @@ void TimeAutosync::setupCDKF() {
 
 double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
                                             const cv::Mat& image) {
-  constexpr int kMaxCorners = 50;
+  constexpr int kMaxCorners = 100;
   constexpr double kQualityLevel = 0.01;
   constexpr double kMinDistance = 10;
 
@@ -195,7 +190,7 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   if (stamp_on_arrival_) {
     stamp = ros::Time::now();
   } else {
-    stamp = msg->header.stamp + ros::Duration(0.2);
+    stamp = msg->header.stamp;
   }
 
   cv_bridge::CvImagePtr image = cv_bridge::toCvCopy(msg, "mono8");
@@ -210,12 +205,12 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
     return;
   }
 
-  if (calc_offset && (imu_rotations_.size() < 2)) {
+  if (calc_offset_ && (imu_rotations_.size() < 2)) {
     return;
   }
 
   double image_angle = 0.0;
-  if (calc_offset) {
+  if (calc_offset_) {
     image_angle = calcAngleBetweenImages(images.begin()->image,
                                          std::next(images.begin())->image);
   }
@@ -224,7 +219,7 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   cdkf_->predictionUpdate(std::next(images.begin())->header.stamp);
   cdkf_->measurementUpdate(images.begin()->header.stamp,
                            std::next(images.begin())->header.stamp, image_angle,
-                           imu_rotations_, calc_offset);
+                           imu_rotations_, calc_offset_);
 
   images.pop_front();
 }

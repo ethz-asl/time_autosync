@@ -1,12 +1,17 @@
 #ifndef CDKF_TIME_AUTOSYNC_H
 #define CDKF_TIME_AUTOSYNC_H
 
+#include <ros/ros.h>
+#include <sensor_msgs/Imu.h>
 #include <Eigen/Eigen>
 
-#include "time_autosync/common.h"
 #include "time_autosync/sigma_points.h"
 #include "time_autosync/state_accessors.h"
 #include "time_autosync/state_data.h"
+
+template <typename Type>
+  using AlignedList = std::list<Type, Eigen::aligned_allocator<Type>>;
+  using IMUList = AlignedList<std::pair<ros::Time, Eigen::Quaterniond>>;
 
 class CDKF {
  public:
@@ -15,8 +20,8 @@ class CDKF {
   struct Config {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    bool verbose = true;
-    double mah_threshold;
+    bool verbose = false;
+    double mah_threshold = 10.0;
 
     // inital values
     double inital_delta_t = 0.05;
@@ -36,197 +41,39 @@ class CDKF {
     double offset_sd = 0.0001;
   };
 
-  CDKF(const Config& config) {
-    state_.resize(kStateSize, 1);
-    accessS(state_, DELTA_T).array() = config.inital_delta_t;
-    accessS(state_, OFFSET).array() = config.inital_offset;
-
-    Eigen::MatrixXd inital_sd(kStateSize, 1);
-    accessS(inital_sd, STATE_TIMESTAMP).array() = config.inital_timestamp_sd;
-    accessS(inital_sd, DELTA_T).array() = config.inital_delta_t_sd;
-    accessS(inital_sd, OFFSET).array() = config.inital_offset_sd;
-
-    cov_.resize(kStateSize, kStateSize);
-    cov_.setZero();
-    cov_.diagonal() = inital_sd.array() * inital_sd.array();
-
-    // set noise sd
-    prediction_noise_sd_.resize(kStateSize, 1);
-    accessS(prediction_noise_sd_, DELTA_T).array() = config.delta_t_sd;
-    accessS(prediction_noise_sd_, OFFSET).array() = config.offset_sd;
-
-    measurement_noise_sd_.resize(kMeasurementSize, 1);
-    accessM(measurement_noise_sd_, MEASURED_TIMESTAMP).array() =
-        config.timestamp_sd;
-    accessM(measurement_noise_sd_, ANGULAR_VELOCITY).array() =
-        config.angular_velocity_sd;
-
-    mah_threshold_ = config.mah_threshold_;
-    verbose_ = config.verbose_;
-  }
+  CDKF(const Config& config);
 
   // make all stored timestamps relative to this one, called periodically to
   // prevent loss in precision
   void rezeroTimestamps(const ros::Time& new_zero_timestamp,
-                        bool first_init = false) {
-    if (!first_init) {
-      double time_diff = (new_zero_timestamp - zero_timestamp_).toSec();
-      accessS(state_, STATE_TIMESTAMP).array() -= time_diff;
-    }
-
-    zero_timestamp_ = new_zero_timestamp;
-  }
+                        bool first_init = false);
 
   // sync the measured timestamp based on the current filter state
-  void getSyncTimestamp(const ros::Time& received_timestamp,
-                        ros::Time* synced_timestamp) {
-    *synced_timestamp =
-        zero_timestamp_ + ros::Duration(accessS(state_, STATE_TIMESTAMP)[0]);
+  void getSyncedTimestamp(const ros::Time& received_timestamp,
+                        ros::Time* synced_timestamp);
 
-    double delta_t = accessS(state_, DELTA_T)[0];
-
-    // account for sync being some frames behind
-    int num_frames =
-        std::round((received_timestamp - *synced_timestamp).toSec() / delta_t);
-
-    if (std::abs(num_frames) > 10) {
-      ROS_WARN_STREAM("Timesync is now off by "
-                      << num_frames
-                      << " frames, something must be going horribly wrong");
-    }
-    *synced_timestamp += ros::Duration(num_frames * delta_t);
-
-    if(calc_offset){
-      *synced_timestamp += ros::Duration(accessS(state_, OFFSET)[0]);
-    }
-  }
-
-  void predictionUpdate(const ros::Time& received_timestamp) {
-    
-    if(verbose_){
-      ROS_INFO_STREAM("Initial State: \n" << state_.transpose());
-      ROS_INFO_STREAM("Initial Cov: \n" << cov_);
-    }
-
-    StateSigmaPoints sigma_points(state_, cov_, prediction_noise_sd_,
-                                  CDKF::propergateState,
-                                  received_timestamp - zero_timestamp_);
-
-    sigma_points.calcEstimatedMean(&state_);
-    sigma_points.calcEstimatedCov(&cov_);
-
-    if(verbose_){
-      ROS_INFO_STREAM("Predicted State: \n" << state_.transpose());
-      ROS_INFO_STREAM("Predicted Cov: \n" << cov_);
-    }
-  }
+  void predictionUpdate(const ros::Time& received_timestamp);
 
   void measurementUpdate(const ros::Time& prev_stamp,
                          const ros::Time& current_stamp,
                          const double image_angular_velocity,
-                         const IMUList& imu_rotations, const bool calc_offset) {
-    // convert tracked points to measurement
-    Eigen::VectorXd real_measurement(kMeasurementSize);
-    accessM(real_measurement, MEASURED_TIMESTAMP).array() =
-        (current_stamp - zero_timestamp_).toSec();
-
-    accessM(real_measurement, ANGULAR_VELOCITY).array() =
-        image_angular_velocity;
-
-    if(verbose_){
-      ROS_INFO_STREAM("Measured Values: \n" << real_measurement.transpose());
-    }
-
-    // create sigma points
-    MeasurementSigmaPoints sigma_points(
-        state_, cov_, measurement_noise_sd_, CDKF::stateToMeasurementEstimate,
-        imu_rotations, zero_timestamp_, calc_offset);
-
-    // get mean and cov
-    Eigen::VectorXd predicted_measurement;
-    sigma_points.calcEstimatedMean(&predicted_measurement);
-    Eigen::MatrixXd innovation;
-    sigma_points.calcEstimatedCov(&innovation);
-
-    if(verbose_){
-      ROS_INFO_STREAM("Predicted Measurements: \n" << predicted_measurement.transpose());
-    }
-
-    // calc mah distance
-    Eigen::VectorXd diff = real_measurement - predicted_measurement;
-    double mah_dist = std::sqrt(diff.transpose() * innovation.inverse() * diff);
-    if (mah_dist > mah_threshold_) {
-      ROS_WARN("Outlier detected, measurement rejected");
-      return;
-    }
-
-    Eigen::MatrixXd cross_cov;
-    sigma_points.calcEstimatedCrossCov(&cross_cov);
-
-    Eigen::MatrixXd gain = cross_cov * innovation.inverse();
-
-    const Eigen::VectorXd state_diff =
-        gain * (real_measurement - predicted_measurement);
-
-    state_ += state_diff;
-
-    cov_ -= gain * innovation * gain.transpose();
-
-    if(verbose_){
-      ROS_INFO_STREAM("Updated State: \n" << state_.transpose());
-      ROS_INFO_STREAM("Updated Cov: \n" << cov_);
-    }
-
-    // guard against precision issues
-    constexpr double kMaxTime = 10000.0;
-    if (accessS(state_, STATE_TIMESTAMP)[0] > kMaxTime) {
-      rezeroTimestamps(current_stamp);
-    }
-  }
+                         const IMUList& imu_rotations, const bool calc_offset);
 
   static void stateToMeasurementEstimate(
       const IMUList& imu_rotations, const ros::Time zero_stamp,
       bool calc_offset, const Eigen::VectorXd& input_state,
       const Eigen::VectorXd& noise,
-      Eigen::Ref<Eigen::VectorXd> estimated_measurement) {
-    ros::Time end_stamp =
-        zero_stamp + ros::Duration(accessS(input_state, STATE_TIMESTAMP)[0]);
+      Eigen::Ref<Eigen::VectorXd> estimated_measurement);
 
-    // this doesn't guard against the case of a dropped frame, but the angular
-    // velocity will probably still be pretty similar
-    ros::Time start_stamp =
-        end_stamp - ros::Duration(accessS(input_state, DELTA_T)[0]);
+  static void propergateState(const Eigen::VectorXd& noise,
+                              Eigen::Ref<Eigen::VectorXd> current_state);
 
-    accessM(estimated_measurement, ANGULAR_VELOCITY).array() =
-        accessM(noise, ANGULAR_VELOCITY)[0];
+  static Eigen::Quaterniond getInterpolatedImuAngle(
+      const IMUList& imu_rotations, const ros::Time& stamp);
 
-    if (calc_offset) {
-      end_stamp += ros::Duration(accessS(input_state, OFFSET)[0]);
-      accessM(estimated_measurement, ANGULAR_VELOCITY).array() +=
-          getImuAngleChange(imu_rotations, start_stamp, end_stamp);
-    }
-
-    accessM(estimated_measurement, MEASURED_TIMESTAMP) =
-        accessS(input_state, STATE_TIMESTAMP) + accessM(noise, STATE_TIMESTAMP);
-  }
-
-  static void propergateState(const ros::Duration& zeroed_receive_timestamp,
-                              const Eigen::VectorXd& noise,
-                              Eigen::Ref<Eigen::VectorXd> current_state) {
-    // work out how many frames to go forward to guard against drops
-    int num_frames = std::round((zeroed_receive_timestamp.toSec() -
-                                 accessS(current_state, STATE_TIMESTAMP)[0]) /
-                                accessS(current_state, DELTA_T)[0]);
-    if (num_frames < 1) {
-      num_frames = 1;
-    }
-
-    accessS(current_state, DELTA_T) += accessS(noise, DELTA_T);
-    accessS(current_state, OFFSET) += accessS(noise, OFFSET);
-
-    accessS(current_state, STATE_TIMESTAMP) +=
-        accessS(current_state, DELTA_T) * num_frames;
-  }
+  static double getImuAngleChange(const IMUList& imu_rotations,
+                                  const ros::Time& start_stamp,
+                                  const ros::Time& end_stamp);
 
  private:
   ros::Time zero_timestamp_;

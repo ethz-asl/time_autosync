@@ -3,8 +3,6 @@
 
 #include <Eigen/Eigen>
 
-#include "time_autosync/common.h"
-
 enum StateElements : size_t {
   STATE_TIMESTAMP,
   DELTA_T,
