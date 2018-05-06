@@ -12,7 +12,7 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
       it_(nh_private_),
       stamp_on_arrival_(false),
       max_imu_data_age_s_(2.0),
-      delay_by_n_frames_(3),
+      delay_by_n_frames_(5),
       focal_length_(460.0),
       calc_offset_(true) {
 
@@ -193,11 +193,18 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
     stamp = msg->header.stamp;
   }
 
+  static std::list<cv_bridge::CvImage> images;
   cv_bridge::CvImagePtr image = cv_bridge::toCvCopy(msg, "mono8");
+
+  // fire the image back out with minimal lag
+  if (images.size() >= (delay_by_n_frames_-1)) {
+    cdkf_->getSyncedTimestamp(stamp, &(image->header.stamp));
+    image_pub_.publish(image->toImageMsg());
+  }
+
   image->header.stamp = stamp;
 
   // delay by a few messages to ensure IMU messages span needed range
-  static std::list<cv_bridge::CvImage> images;
   images.push_back(*image);
 
   if (images.size() < delay_by_n_frames_) {

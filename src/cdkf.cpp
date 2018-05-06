@@ -60,6 +60,15 @@ void CDKF::getSyncedTimestamp(const ros::Time& received_timestamp,
   }
   *synced_timestamp += ros::Duration(num_frames * delta_t);
   *synced_timestamp += ros::Duration(accessS(state_, OFFSET)[0]);
+
+  if (verbose_) {
+    ROS_INFO_STREAM("Input Timestamp: " << received_timestamp.sec << "."
+                                        << std::setfill('0') << std::setw(9)
+                                        << received_timestamp.nsec);
+    ROS_INFO_STREAM("Output Timestamp: " << synced_timestamp->sec << "."
+                                         << std::setfill('0') << std::setw(9)
+                                         << synced_timestamp->nsec);
+  }
 }
 
 void CDKF::predictionUpdate(const ros::Time& received_timestamp) {

@@ -23,11 +23,11 @@ class CDKF {
     bool verbose = false;
     double mah_threshold = 10.0;
 
-    // inital values
+    // initial values
     double inital_delta_t = 0.05;
     double inital_offset = 0.0;
 
-    // inital noise values
+    // initial noise values
     double inital_timestamp_sd = 0.1;
     double inital_delta_t_sd = 0.1;
     double inital_offset_sd = 0.1;
