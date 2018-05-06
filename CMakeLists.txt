@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(time_autosync)
 
+find_package(Eigen3 REQUIRED)
+
+include_directories(
+  include
+  ${EIGEN3_INCLUDE_DIR}
+)
+
 find_package(catkin_simple REQUIRED)
 catkin_simple(ALL_DEPS_REQUIRED)
 find_package(OpenCV 3 REQUIRED COMPONENTS core calib3d video)
