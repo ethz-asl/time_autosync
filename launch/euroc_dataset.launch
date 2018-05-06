@@ -1,0 +1,20 @@
+<launch>
+
+<param name="/use_sim_time" value="true"/>
+
+<node name="player" pkg="rosbag" type="play" output="screen" args=" -s 35 -r 0.3 --clock /home/z/Datasets/V1_01_easy.bag"/>
+
+<node name="image_undistort_node" pkg="image_undistort" type="image_undistort_node">
+  <param name="input_camera_namespace" value="cam0"/>      
+  <param name="input_camera_info_from_ros_params" value = "true"/>    
+  <rosparam file="$(find viuk)/cfg/euroc.yaml"/>
+  <remap from="input/image" to="/cam0/image_raw"/>
+</node>
+
+<node name="time_autosync" pkg="time_autosync" type="time_autosync_node" >
+
+    <param name="stamp_on_arrival" value="true"/>
+    <remap from="/time_autosync/input/image" to="/cam0/image_raw"/>
+</node>
+
+</launch>
