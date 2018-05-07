@@ -43,23 +43,24 @@ void CDKF::rezeroTimestamps(const ros::Time& new_zero_timestamp,
 
 // sync the measured timestamp based on the current filter state
 void CDKF::getSyncedTimestamp(const ros::Time& received_timestamp,
-                              ros::Time* synced_timestamp) {
+                              ros::Time* synced_timestamp, double* delta_t, double* offset) {
   *synced_timestamp =
       zero_timestamp_ + ros::Duration(accessS(state_, STATE_TIMESTAMP)[0]);
 
-  double delta_t = accessS(state_, DELTA_T)[0];
+  *delta_t = accessS(state_, DELTA_T)[0];
+  *offset = accessS(state_, OFFSET)[0];
 
   // account for sync being some frames behind
   int num_frames =
-      std::round((received_timestamp - *synced_timestamp).toSec() / delta_t);
+      std::round((received_timestamp - *synced_timestamp).toSec() / *delta_t);
 
   if (std::abs(num_frames) > 10) {
     ROS_WARN_STREAM("Timesync is now off by "
                     << num_frames
                     << " frames, something must be going horribly wrong");
   }
-  *synced_timestamp += ros::Duration(num_frames * delta_t);
-  *synced_timestamp += ros::Duration(accessS(state_, OFFSET)[0]);
+  *synced_timestamp += ros::Duration(num_frames * *delta_t);
+  *synced_timestamp += ros::Duration(*offset);
 
   if (verbose_) {
     ROS_INFO_STREAM("Input Timestamp: " << received_timestamp.sec << "."

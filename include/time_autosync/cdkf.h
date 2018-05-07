@@ -50,7 +50,7 @@ class CDKF {
 
   // sync the measured timestamp based on the current filter state
   void getSyncedTimestamp(const ros::Time& received_timestamp,
-                        ros::Time* synced_timestamp);
+                        ros::Time* synced_timestamp, double* delta_t, double* offset);
 
   void predictionUpdate(const ros::Time& received_timestamp);
 

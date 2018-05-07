@@ -6,6 +6,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <image_transport/image_transport.h>
 
+#include <std_msgs/Float64.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/Imu.h>
 
@@ -34,6 +35,8 @@ class TimeAutosync {
   ros::Subscriber imu_sub_;
   image_transport::Subscriber image_sub_;
 
+  ros::Publisher delta_t_pub_;
+  ros::Publisher offset_pub_;
   image_transport::Publisher image_pub_;
 
   bool stamp_on_arrival_;

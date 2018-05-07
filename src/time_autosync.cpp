@@ -15,7 +15,6 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
       delay_by_n_frames_(5),
       focal_length_(460.0),
       calc_offset_(true) {
-
   nh_private_.param("stamp_on_arrival", stamp_on_arrival_, stamp_on_arrival_);
   nh_private_.param("max_imu_data_age_s", max_imu_data_age_s_,
                     max_imu_data_age_s_);
@@ -28,12 +27,21 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
 
   constexpr int kImageQueueSize = 10;
   constexpr int kImuQueueSize = 100;
+  constexpr int kFloatQueueSize = 100;
 
   image_sub_ = it_.subscribe("input/image", kImageQueueSize,
                              &TimeAutosync::imageCallback, this);
 
   imu_sub_ = nh_private_.subscribe("input/imu", kImuQueueSize,
                                    &TimeAutosync::imuCallback, this);
+
+  delta_t_pub_ =
+      nh_private_.advertise<std_msgs::Float64>("delta_t", kFloatQueueSize);
+
+  if (calc_offset_) {
+    offset_pub_ =
+        nh_private_.advertise<std_msgs::Float64>("offset", kFloatQueueSize);
+  }
 
   image_pub_ = image_pub_ = it_.advertise("output/image", kImageQueueSize);
 }
@@ -197,9 +205,15 @@ void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
   cv_bridge::CvImagePtr image = cv_bridge::toCvCopy(msg, "mono8");
 
   // fire the image back out with minimal lag
-  if (images.size() >= (delay_by_n_frames_-1)) {
-    cdkf_->getSyncedTimestamp(stamp, &(image->header.stamp));
+  if (images.size() >= (delay_by_n_frames_ - 1)) {
+    std_msgs::Float64 delta_t, offset;
+    cdkf_->getSyncedTimestamp(stamp, &(image->header.stamp), &(delta_t.data),
+                              &(offset.data));
     image_pub_.publish(image->toImageMsg());
+    delta_t_pub_.publish(delta_t);
+    if (calc_offset_) {
+      offset_pub_.publish(offset);
+    }
   }
 
   image->header.stamp = stamp;
