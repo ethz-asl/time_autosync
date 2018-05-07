@@ -10,7 +10,7 @@
      need to set them in your launch files if you want to change them to
      something else-->
 
-    <param name="stamp_on_arrival" value="true"/>
+    <param name="stamp_on_arrival" value="false"/>
     <param name="max_imu_data_age_s" value="2.0"/>
     <param name="delay_by_n_frames" value="5"/>
     <param name="focal_length" value="460"/>
