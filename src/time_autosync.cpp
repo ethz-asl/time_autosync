@@ -1,5 +1,7 @@
 #include "time_autosync/time_autosync.h"
 
+#include <pcl/filters/random_sample.h>
+
 #include <opencv2/core/eigen.hpp>
 #include <opencv2/features2d.hpp>
 #include <opencv2/opencv.hpp>
@@ -14,6 +16,7 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
       max_imu_data_age_s_(2.0),
       delay_by_n_frames_(5),
       focal_length_(460.0),
+      use_pointcloud_(false),
       calc_offset_(true) {
   nh_private_.param("stamp_on_arrival", stamp_on_arrival_, stamp_on_arrival_);
   nh_private_.param("max_imu_data_age_s", max_imu_data_age_s_,
@@ -21,16 +24,27 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
   nh_private_.param("delay_by_n_frames", delay_by_n_frames_,
                     delay_by_n_frames_);
   nh_private_.param("focal_length", focal_length_, focal_length_);
+  nh_private_.param("use_pointcloud", use_pointcloud_, use_pointcloud_);
   nh_private_.param("calc_offset", calc_offset_, calc_offset_);
 
   setupCDKF();
 
   constexpr int kImageQueueSize = 10;
+  constexpr int kPointcloudQueueSize = 10;
   constexpr int kImuQueueSize = 100;
   constexpr int kFloatQueueSize = 100;
 
-  image_sub_ = it_.subscribe("input/image", kImageQueueSize,
-                             &TimeAutosync::imageCallback, this);
+  if (use_pointcloud_) {
+    pointcloud_sub_ =
+        nh_private_.subscribe("input/pointcloud", kPointcloudQueueSize,
+                              &TimeAutosync::pointcloudCallback, this);
+    pointcloud_pub_ = nh_private_.advertise<sensor_msgs::PointCloud2>(
+        "output/pointcloud", kPointcloudQueueSize);
+  } else {
+    image_sub_ = it_.subscribe("input/image", kImageQueueSize,
+                               &TimeAutosync::imageCallback, this);
+    image_pub_ = image_pub_ = it_.advertise("output/image", kImageQueueSize);
+  }
 
   imu_sub_ = nh_private_.subscribe("input/imu", kImuQueueSize,
                                    &TimeAutosync::imuCallback, this);
@@ -42,8 +56,6 @@ TimeAutosync::TimeAutosync(const ros::NodeHandle& nh,
     offset_pub_ =
         nh_private_.advertise<std_msgs::Float64>("offset", kFloatQueueSize);
   }
-
-  image_pub_ = image_pub_ = it_.advertise("output/image", kImageQueueSize);
 }
 
 void TimeAutosync::setupCDKF() {
@@ -69,6 +81,46 @@ void TimeAutosync::setupCDKF() {
   nh_private_.param("offset_sd", config.offset_sd, config.offset_sd);
 
   cdkf_ = std::unique_ptr<CDKF>(new CDKF(config));
+}
+
+double TimeAutosync::calcAngleBetweenPointclouds(
+    const pcl::PointCloud<pcl::PointXYZ>& prev_pointcloud,
+    const pcl::PointCloud<pcl::PointXYZ>& pointcloud) {
+  pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr prev_pointcloud_sampled(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr pointcloud_sampled(
+      new pcl::PointCloud<pcl::PointXYZ>);
+
+  // shared_pointers needed by icp, no-op destructor to prevent them being
+  // cleaned up after use
+  pcl::PointCloud<pcl::PointXYZ>::ConstPtr prev_pointcloud_ptr(
+      &prev_pointcloud, [](const pcl::PointCloud<pcl::PointXYZ>*) {});
+  pcl::PointCloud<pcl::PointXYZ>::ConstPtr pointcloud_ptr(
+      &pointcloud, [](const pcl::PointCloud<pcl::PointXYZ>*) {});
+
+  constexpr int kMaxSamples = 2000;
+  pcl::RandomSample<pcl::PointXYZ> sample(false);
+  sample.setSample(kMaxSamples);
+
+  sample.setInputCloud(prev_pointcloud_ptr);
+  sample.filter(*prev_pointcloud_sampled);
+
+  sample.setInputCloud(pointcloud_ptr);
+  sample.filter(*pointcloud_sampled);
+
+  icp.setInputSource(prev_pointcloud_sampled);
+  icp.setInputTarget(pointcloud_sampled);
+
+  pcl::PointCloud<pcl::PointXYZ> final;
+  icp.align(final);
+
+  Eigen::Matrix4f tform = icp.getFinalTransformation();
+  double angle =
+      Eigen::AngleAxisd(tform.topLeftCorner<3, 3>().cast<double>()).angle();
+
+  return angle;
 }
 
 double TimeAutosync::calcAngleBetweenImages(const cv::Mat& prev_image,
@@ -191,6 +243,65 @@ void TimeAutosync::imuCallback(const sensor_msgs::ImuConstPtr& msg) {
   }
 
   prev_msg = *msg;
+}
+
+void TimeAutosync::pointcloudCallback(
+    const sensor_msgs::PointCloud2ConstPtr& msg) {
+  ros::Time stamp;
+  if (stamp_on_arrival_) {
+    stamp = ros::Time::now();
+  } else {
+    stamp = msg->header.stamp;
+  }
+
+  static std::list<std::pair<ros::Time, pcl::PointCloud<pcl::PointXYZ>>>
+      pointclouds;
+  std::pair<ros::Time, pcl::PointCloud<pcl::PointXYZ>> pointcloud;
+  pcl::fromROSMsg(*msg, pointcloud.second);
+
+  // fire the pointcloud back out with minimal lag
+  if (pointclouds.size() >= (delay_by_n_frames_ - 1)) {
+    std_msgs::Float64 delta_t, offset;
+    cdkf_->getSyncedTimestamp(stamp, &(pointcloud.first), &(delta_t.data),
+                              &(offset.data));
+
+    sensor_msgs::PointCloud2 msg_out;
+    pcl::toROSMsg(pointcloud.second, msg_out);
+
+    pointcloud_pub_.publish(msg_out);
+    delta_t_pub_.publish(delta_t);
+    if (calc_offset_) {
+      offset_pub_.publish(offset);
+    }
+  }
+
+  pointcloud.first = stamp;
+
+  // delay by a few messages to ensure IMU messages span needed range
+  pointclouds.push_back(pointcloud);
+
+  if (pointclouds.size() < delay_by_n_frames_) {
+    cdkf_->rezeroTimestamps(pointclouds.front().first, true);
+    return;
+  }
+
+  if (calc_offset_ && (imu_rotations_.size() < 2)) {
+    return;
+  }
+
+  double pointcloud_angle = 0.0;
+  if (calc_offset_) {
+    pointcloud_angle = calcAngleBetweenPointclouds(
+        pointclouds.begin()->second, std::next(pointclouds.begin())->second);
+  }
+
+  // actually run filter
+  cdkf_->predictionUpdate(std::next(pointclouds.begin())->first);
+  cdkf_->measurementUpdate(pointclouds.begin()->first,
+                           std::next(pointclouds.begin())->first,
+                           pointcloud_angle, imu_rotations_, calc_offset_);
+
+  pointclouds.pop_front();
 }
 
 void TimeAutosync::imageCallback(const sensor_msgs::ImageConstPtr& msg) {
