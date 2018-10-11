@@ -6,7 +6,7 @@
 
 Under the skin the system is just a central difference kalman filter.
 - It assumes a constant camera framerate and uses this to get rid of some of the jitter from arrival times
-- Absolute offsets are calculated by aligning the IMU's measured angular velocity to that perceived by a simple Lukas-Kinard tracker running on the camera images. Obviously this will only work on systems that undergo significant movement.
+- Absolute offsets are calculated by aligning the IMU's measured angular velocity to that perceived by a simple Lucas-Kanade tracker running on the camera images. Obviously this will only work on systems that undergo significant movement.
 
 This filter is pretty new and only tested on a couple of datasets I had lying around, so expect some issues when you first run it.
 
